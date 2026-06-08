@@ -1,4 +1,5 @@
 import express, { Request, Response } from 'express';
+import { streamRestaurants } from './restaurantLoader';
 import path from 'path';
 
 const app = express();
@@ -11,6 +12,24 @@ app.use(express.static(path.join(__dirname, '../../public')));
 app.get('/api/hello', (req: Request, res: Response) => {
   res.json({ message: 'Hello from Express!' });
 });
+
+app.get(
+  '/api/restaurants/stream',
+  async (_req: Request, res: Response) => {
+    res.setHeader(
+      'Content-Type',
+      'application/x-ndjson',
+    );
+    
+    // Disable caching so clients receive streamed updates immediately.
+    res.setHeader(
+      'Cache-Control',
+      'no-cache',
+    );
+
+    await streamRestaurants(res);
+  },
+);
 
 // Streaming endpoint - sends chunks every 0.3 seconds for 5 seconds
 app.get('/api/stream', (req: Request, res: Response) => {
@@ -31,6 +50,8 @@ app.get('/api/stream', (req: Request, res: Response) => {
       progress: counter,
     };
 
+    // NDJSON streams send one JSON object per line, allowing
+    // the client to process updates incrementally
     res.write(JSON.stringify(chunk) + '\n');
 
     // Check if we've exceeded the max duration

@@ -5,11 +5,37 @@ interface ApiResponse {
   message: string;
 }
 
+interface RestaurantSummary {
+  id: number;
+  name: string;
+  suburb: string;
+  vertical: string;
+}
+
 interface StreamChunk {
-  type: 'progress' | 'conclusion'; // consider adding 'initial' and replacing 'progress' with 'details-update' and 'menu-update'
-  progress?: number;
-  conclusion?: string;
-  // add more fields here as needed for different chunk types
+  type:
+    | 'initial'
+    | 'restaurant-update'
+    | 'restaurant-error'
+    | 'complete';
+
+  total?: number;
+  completed?: number;
+
+  restaurants?: RestaurantSummary[];
+
+  restaurantId?: number;
+
+  details?: {
+    name: string;
+    description: string;
+    address?: {
+      suburb?: string;
+      town?: string;
+    };
+  };
+
+  error?: string;
 }
 
 const testBtn = document.getElementById('testBtn') as HTMLButtonElement;
@@ -30,14 +56,22 @@ testBtn?.addEventListener('click', async () => {
   }
 });
 
+// Cache row references so streamed updates can update a specific row
+// without querying or traversing the DOM each time.
+const rowMap = new Map<number, HTMLTableRowElement>();
+
 streamBtn?.addEventListener('click', async () => {
   statusText.textContent = 'Streaming...';
   progressText.textContent = '-';
   conclusionText.textContent = '-';
   streamBtn.disabled = true;
 
+  resultDiv.innerHTML = '';
+  rowMap.clear();
+
   try {
-    const response = await fetch('/api/stream');
+    const response = await fetch('/api/restaurants/stream');
+
     if (!response.body) {
       throw new Error('Response body is null');
     }
@@ -50,15 +84,19 @@ streamBtn?.addEventListener('click', async () => {
       const { done, value } = await reader.read();
       if (done) break;
 
-      // Decode the chunk and add to buffer
+      // Streaming chunks may split JSON messages across network boundaries.
+      // Buffer partial data until a newline-delimited message is complete.
       buffer += decoder.decode(value, { stream: true });
 
-      // Split by newlines and process complete JSON objects
       const lines = buffer.split('\n');
-      buffer = lines[lines.length - 1]; // Keep incomplete line in buffer
+
+      // Preserve the final incomplete line so it can be completed
+      // by the next chunk from the stream.
+      buffer = lines[lines.length - 1];
 
       for (let i = 0; i < lines.length - 1; i++) {
         const line = lines[i].trim();
+
         if (line) {
           try {
             const chunk: StreamChunk = JSON.parse(line);
@@ -80,10 +118,77 @@ streamBtn?.addEventListener('click', async () => {
 });
 
 function chunkProcessor(chunk: StreamChunk) {
-  if (chunk.type === 'progress' && chunk.progress !== undefined) {
-    progressText.textContent = `${chunk.progress} updates received`;
-  } else if (chunk.type === 'conclusion' && chunk.conclusion) {
-    conclusionText.textContent = chunk.conclusion;
+  if (chunk.type === 'initial') {
+    progressText.textContent = `0 / ${chunk.total}`;
+
+    resultDiv.innerHTML = `
+      <table class="restaurant-table">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Suburb</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="restaurants-body"></tbody>
+      </table>
+    `;
+
+    const tbody = document.getElementById(
+      'restaurants-body',
+    ) as HTMLTableSectionElement;
+
+    chunk.restaurants?.forEach((restaurant) => {
+      const row = document.createElement('tr');
+
+      row.innerHTML = `
+        <td>${restaurant.name}</td>
+        <td>${restaurant.suburb}</td>
+        <td class="loading">Loading...</td>
+      `;
+
+      tbody.appendChild(row);
+
+      rowMap.set(restaurant.id, row);
+    });
+
+    return;
+  }
+
+  if (chunk.type === 'restaurant-update') {
+    progressText.textContent =
+      `${chunk.completed} / ${chunk.total}`;
+
+    // Lookup is O(1) because rows were indexed during the initial payload.
+    const row = rowMap.get(chunk.restaurantId!);
+
+    if (row && chunk.details) {
+      row.cells[2].textContent = 'Loaded';
+      row.cells[2].className = 'loaded';
+    }
+
+    return;
+  }
+
+  if (chunk.type === 'restaurant-error') {
+    progressText.textContent =
+      `${chunk.completed} / ${chunk.total}`;
+
+    const row = rowMap.get(chunk.restaurantId!);
+
+    if (row) {
+      row.cells[2].textContent = 'Error';
+      row.cells[2].className = 'error';
+    }
+
+    return;
+  }
+
+  if (chunk.type === 'complete') {
+    statusText.textContent = 'Completed';
+
+    conclusionText.textContent =
+      `loaded ${chunk.completed} of ${chunk.total}`;
   }
 }
 
